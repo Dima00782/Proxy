@@ -4,6 +4,7 @@
 #include <utility>
 #include <iostream>
 #include <cassert>
+#include <cstddef>
 
 Proxy::Proxy(unsigned short port)
     : m_port(port)
@@ -48,22 +49,26 @@ void Proxy::handle_connections()
 {
     char buffer[m_size_of_buffer] = {0, };
     std::size_t received = 0;
-    for (auto& connection : m_connections)
+
+    for (auto it = m_connections.begin(); it != m_connections.end(); )
     {
+        auto& connection = it->second;
         if (m_selector.isReady(*connection))
         {
-            // The client has sent some data, we can receive it
             assert(m_size_of_buffer > 0); // buffer size must be more than zero
-            auto code = connection->receive(buffer, m_size_of_buffer, received);
-            if (code == sf::Socket::Done)
+            auto status = connection->receive(buffer, m_size_of_buffer, received);
+            if (status == sf::Socket::Done)
             {
                 buffer[m_size_of_buffer - 1] = '\0';
                 std::cout << buffer << std::endl;
+                ++it;
             }
             else
             {
                 m_selector.remove(*connection);
-                if (code != sf::Socket::Disconnected)
+                it = m_connections.erase(it);
+
+                if (status != sf::Socket::Disconnected)
                 {
                     std::cerr << "error on receive\n";
                 }
@@ -84,11 +89,15 @@ void Proxy::handle_incoming_connection()
     if (status == sf::Socket::Done)
     {
         connection->setBlocking(false);
+
         // Add the new connection to the selector so that we will
         // be notified when he sends something
         m_selector.add(*connection);
+
         // Add the new connection to the connections list
-        m_connections.push_back(std::move(connection));
+        auto address = connection->getRemoteAddress().toInteger();
+        auto port = connection->getRemotePort();
+        m_connections[std::pair<uint32_t, unsigned short>(address, port)] = std::move(connection);
     }
     else if (status == sf::Socket::NotReady)
     {

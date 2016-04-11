@@ -4,11 +4,16 @@
 #include <SFML/Network.hpp>
 #include <atomic>
 #include <cstddef>
+#include <utility>
+#include <map>
 
 class Proxy final
 {
 public:
     Proxy(const unsigned short port);
+
+    Proxy(const Proxy&) = delete;
+    Proxy& operator= (const Proxy&) = delete;
 
     void start();
 
@@ -22,7 +27,9 @@ private:
     std::size_t m_size_of_buffer;
 
     sf::TcpListener m_listener;
-    std::vector< std::unique_ptr<sf::TcpSocket> > m_connections;
+
+    using ID = std::pair<uint32_t, unsigned short>;
+    std::map< ID, std::unique_ptr<sf::TcpSocket> > m_connections;
     sf::SocketSelector m_selector;
 
 private:
