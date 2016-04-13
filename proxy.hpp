@@ -27,12 +27,14 @@ public:
     {
         Connection()
             : state(ConnectionState::RECEIVING_REQUEST)
+            , response_received(false)
         {}
 
         Connection(std::unique_ptr<sf::TcpSocket>&& _clinet_socket)
             : state(ConnectionState::RECEIVING_REQUEST)
             , request_socket(std::move(_clinet_socket))
             , idx(0)
+            , response_received(false)
         {}
 
         ConnectionState state;
@@ -44,6 +46,8 @@ public:
 
         std::size_t idx;
         std::vector<char> request;
+
+        bool response_received;
     };
 
 public:
@@ -79,6 +83,8 @@ private:
     std::map< ConnectionState, std::function<bool(Proxy*, Connection*)> > transitions;
 
     Logger m_logger;
+
+    bool in_progress;
 
 private:
     void handle_incoming_connection();
