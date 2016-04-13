@@ -7,8 +7,10 @@
 #include <utility>
 #include <memory>
 #include <map>
+#include <functional>
 
 #include "httpparser.hpp"
+#include "logger.hpp"
 
 class Proxy final
 {
@@ -45,7 +47,7 @@ public:
     };
 
 public:
-    Proxy(const unsigned short port);
+    Proxy(const unsigned short port, const Logger& log);
 
     Proxy(const Proxy&) = delete;
     Proxy& operator= (const Proxy&) = delete;
@@ -61,6 +63,8 @@ private:
 
     static const std::size_t m_size_of_buffer =  1024;
 
+    static const std::size_t m_max_request_legnth = 1024;
+
     sf::TcpListener m_listener;
 
     using ID = std::pair<uint32_t, unsigned short>;
@@ -72,16 +76,20 @@ private:
 
     char buffer[m_size_of_buffer];
 
+    std::map< ConnectionState, std::function<bool(Proxy*, Connection*)> > transitions;
+
+    Logger m_logger;
+
 private:
     void handle_incoming_connection();
     void handle_connections();
 
     bool handle_receiving_request(Connection *connection);
-    void handle_connecting_to_server(Connection *connection);
-    void handle_sending_request(Connection *connection);
-    void handle_retransmitting_response(Connection *connection);
+    bool handle_connecting_to_server(Connection *connection);
+    bool handle_sending_request(Connection *connection);
+    bool handle_retransmitting_response(Connection *connection);
 
-    void handle_received_data(Connection* connection, char* buffer, const std::size_t received);
+    bool handle_received_data(Connection* connection, char* buffer, const std::size_t received);
 
     void send_error(sf::TcpSocket* socket, const char* const message, const std::size_t size);
 };

@@ -1,8 +1,10 @@
 #include "proxy.hpp"
+#include <iostream>
 
 int main()
 {
-    Proxy proxy(12348);
+    Logger l;
+    Proxy proxy(12345, l);
     proxy.start();
 
     return 0;

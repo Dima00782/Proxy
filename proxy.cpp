@@ -5,6 +5,7 @@
 #include <iostream>
 #include <cassert>
 #include <cstddef>
+#include <string>
 
 namespace
 {
@@ -25,10 +26,19 @@ bool request_is_end(const std::vector<char>& request)
 
 }
 
-Proxy::Proxy(unsigned short port)
+Proxy::Proxy(unsigned short port, const Logger& log)
     : m_port(port)
     , m_running(false)
-{}
+    , m_logger(log)
+{
+    transitions =
+    {
+        { ConnectionState::RECEIVING_REQUEST,       &Proxy::handle_receiving_request},
+        { ConnectionState::CONNECTING_TO_SERVER,    &Proxy::handle_connecting_to_server},
+        { ConnectionState::SENDING_REQUEST,         &Proxy::handle_sending_request},
+        { ConnectionState::RETRANSMITTING_RESPONSE, &Proxy::handle_retransmitting_response}
+    };
+}
 
 void Proxy::start()
 {
@@ -69,26 +79,10 @@ void Proxy::handle_connections()
 {
     for (auto it = m_connections.begin(); it != m_connections.end(); )
     {
-        Connection& connection = it->second;
-        if (connection.state == ConnectionState::RECEIVING_REQUEST)
-        {
-            it = handle_receiving_request(&connection) ? ++it : m_connections.erase(it);
-        }
-        else if (connection.state == ConnectionState::CONNECTING_TO_SERVER)
-        {
-            handle_connecting_to_server(&connection);
-            ++it;
-        }
-        else if (connection.state == ConnectionState::SENDING_REQUEST)
-        {
-            handle_sending_request(&connection);
-            ++it;
-        }
-        else if (connection.state == ConnectionState::RETRANSMITTING_RESPONSE)
-        {
-            handle_retransmitting_response(&connection);
-            ++it;
-        }
+        Connection* connection = &it->second;
+        auto handler = transitions[connection->state];
+        if (handler(this, connection)) { it = m_connections.erase(it); }
+        else { ++it; }
     }
 }
 
@@ -100,11 +94,10 @@ bool Proxy::handle_receiving_request(Connection* connection)
     if (m_selector.isReady(*socket))
     {
         assert(m_size_of_buffer > 0); // buffer size must be more than zero
-        auto status = socket->receive(buffer, m_size_of_buffer, received);
+        auto status = socket->receive(buffer, m_size_of_buffer - 1, received);
         if (status == sf::Socket::Done || status == sf::Socket::NotReady)
         {
-            handle_received_data(connection, buffer, received);
-            return true;
+            return handle_received_data(connection, buffer, received);
         }
 
         m_selector.remove(*socket);
@@ -114,20 +107,21 @@ bool Proxy::handle_receiving_request(Connection* connection)
         }
         else
         {
-            std::cout << "goodby" << std::endl;
+            std::cout << "goodby\n";
         }
+        return true;
     }
 
     return false;
 }
 
-void Proxy::handle_connecting_to_server(Proxy::Connection* connection)
+bool Proxy::handle_connecting_to_server(Proxy::Connection* connection)
 {
     assert(connection->state == ConnectionState::CONNECTING_TO_SERVER);
     assert(connection->response_socket != nullptr);
 
-    auto& socket = *connection->response_socket;
-    auto status = socket.connect(connection->address, HTTP_PORT, sf::milliseconds(10));
+    auto socket = connection->response_socket.get();
+    auto status = socket->connect(connection->address, HTTP_PORT);
     if (status == sf::Socket::NotReady)
     {
         // nothing to do here
@@ -136,50 +130,122 @@ void Proxy::handle_connecting_to_server(Proxy::Connection* connection)
     {
         std::size_t sent = 0;
         auto& vector = connection->request;
-        connection->response_socket->send(vector.data() + connection->idx, vector.size() - connection->idx, sent);
+        auto status = connection->response_socket->send(vector.data() + connection->idx, vector.size() - connection->idx, sent);
+        if (status == sf::Socket::Error)
+        {
+            std::cerr << "error on handle_connecting_to_server:send\n";
+            m_selector.remove(*socket);
+            m_selector.remove(*connection->request_socket);
+            return true;
+        }
         connection->idx += sent;
         connection->state = ConnectionState::SENDING_REQUEST;
     }
+    else
+    {
+        std::cerr << "can't connect in handle_connecting_to_server:connect\n";
+        m_selector.remove(*socket);
+        m_selector.remove(*connection->request_socket);
+        return true;
+    }
+
+    return false;
 }
 
-void Proxy::handle_sending_request(Connection* connection)
+bool Proxy::handle_sending_request(Connection* connection)
 {
     assert(connection->state == ConnectionState::SENDING_REQUEST);
     assert(connection->response_socket != nullptr);
 
-    auto& socket = *connection->response_socket;
-    if (m_selector.isReady(socket))
+    auto socket = connection->response_socket.get();
+    if (m_selector.isReady(*socket))
     {
         if (connection->idx != connection->request.size())
         {
             std::size_t sent = 0;
-            socket.send(connection->request.data() + connection->idx, connection->request.size() - connection->idx, sent);
+            auto status = socket->send(connection->request.data() + connection->idx, connection->request.size() - connection->idx, sent);
+            if (status == sf::Socket::Error)
+            {
+                std::cerr << "error on handle_sending_request::send\n";
+                return true;
+            }
             connection->idx += sent;
         }
         else
         {
+            connection->request.clear();
+            connection->idx = 0;
             connection->state = ConnectionState::RETRANSMITTING_RESPONSE;
         }
     }
+
+    return false;
 }
 
-void Proxy::handle_retransmitting_response(Connection* connection)
+bool Proxy::handle_retransmitting_response(Connection* connection)
 {
     assert(connection->state == ConnectionState::RETRANSMITTING_RESPONSE);
     assert(connection->request_socket != nullptr);
     assert(connection->response_socket != nullptr);
 
-    auto socket = connection->response_socket.get();
-    if (m_selector.isReady(socket))
+    auto resposne_socket = connection->response_socket.get();
+    auto request_socket = connection->request_socket.get();
+    if (m_selector.isReady(*resposne_socket))
     {
+        std::size_t received;
+        auto status = resposne_socket->receive(buffer, m_size_of_buffer - 1, received);
+        if (status == sf::Socket::NotReady)
+        {
+            connection->request.insert(connection->request.end(), buffer, buffer + received);
+        }
+        else if (status == sf::Socket::Error)
+        {
+            std::cerr << "error on handle_retransmitting_response::receive\n";
+            m_selector.remove(*request_socket);
+            m_selector.remove(*resposne_socket);
+            return true;
+        }
     }
+
+    if (m_selector.isReady(*request_socket))
+    {
+        std::size_t sent;
+        auto* vector = &connection->request;
+        if (vector->size() < connection->idx)
+        {
+            auto status = request_socket->send(vector->data(), vector->size() - connection->idx, sent);
+            if (status == sf::Socket::Done || status == sf::Socket::Error)
+            {
+                if (status == sf::Socket::Error) { std::cerr << "error on handle_retransmitting_response::send\n"; }
+
+                m_selector.remove(*request_socket);
+                m_selector.remove(*resposne_socket);
+                return true;
+            }
+            else { connection->idx += sent; }
+        }
+        else
+        {
+            m_selector.remove(*request_socket);
+            m_selector.remove(*resposne_socket);
+            return true;
+
+        }
+    }
+
+    return false;
 }
 
-void Proxy::handle_received_data(Connection* connection, char* buffer, const std::size_t received)
+bool Proxy::handle_received_data(Connection* connection, char* buffer, const std::size_t received)
 {
     buffer[received] = '\0';
 
-    // add checks for very large request?
+    if (connection->request.size() > m_max_request_legnth)
+    {
+        // too large request, it must be an attack -> 500 Internal Server Error
+        send_error(connection->request_socket.get(), "HTTP/1.0 500 OK", 16);
+    }
+
     connection->request.insert(connection->request.end(), buffer, buffer + received);
 
     if (request_is_end(connection->request))
@@ -191,6 +257,16 @@ void Proxy::handle_received_data(Connection* connection, char* buffer, const std
             {
                 // initialize new socket and add it to the selector
                 connection->address = sf::IpAddress(header.URI);
+
+                // log
+                auto address = connection->request_socket->getRemoteAddress().toInteger();
+                auto port = connection->request_socket->getRemotePort();
+                m_logger.get_stream(Logger::LOG_LEVEL::INFO)
+                        << "NEW CLIENT "
+                        << "Address : " << std::to_string(address)
+                        << " Port : " + std::to_string(port)
+                        << " URL : " + header.URI << std::endl;
+
                 assert(connection->response_socket == nullptr);
                 connection->response_socket = std::make_unique<sf::TcpSocket>();
 
@@ -208,34 +284,26 @@ void Proxy::handle_received_data(Connection* connection, char* buffer, const std
             {
                 // not suppoted -> 405 Method Not Allowed
                 send_error(connection->request_socket.get(), "HTTP/1.0 405 OK", 16);
-
-                // delete from map
                 m_selector.remove(*connection->request_socket);
+                return true;
             }
         }
         else
         {
             // server can't parse request -> 400 Bad Request
             send_error(connection->request_socket.get(), "HTTP/1.0 400 OK", 16);
-
-            // delete from map
             m_selector.remove(*connection->request_socket);
+            return true;
         }
-
-        // log
-        for (auto ch : connection->request) { std::cout << ch; }
-        std::cout << std::endl;
     }
+
+    return false;
 }
 
 void Proxy::send_error(sf::TcpSocket *socket, const char* const message, const std::size_t size)
 {
     std::size_t sent;
-    if (socket->send(message, size, sent) != sf::Socket::Done)
-    {
-        std::cerr << "error on send_error" << std::endl;
-    }
-
+    if (socket->send(message, size, sent) != sf::Socket::Done) { std::cerr << "error on send_error\n"; }
     assert(sent != size);
 }
 
@@ -259,12 +327,6 @@ void Proxy::handle_incoming_connection()
         auto port = client_socket->getRemotePort();
         m_connections[std::pair<uint32_t, unsigned short>(address, port)] = std::move(connection);
     }
-    else if (status == sf::Socket::NotReady)
-    {
-        std::cout << "not ready" << std::endl;
-    }
-    else
-    {
-        std::cerr << "error on accept\n";
-    }
+    else if (status == sf::Socket::NotReady) { std::cerr << "not ready\n"; }
+    else { std::cerr << "error on accept\n"; }
 }
