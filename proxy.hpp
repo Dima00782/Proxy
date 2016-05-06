@@ -1,14 +1,16 @@
 #ifndef PROXY_HPP
 #define PROXY_HPP
 
-#include <SFML/Network.hpp>
 #include <atomic>
 #include <cstddef>
 #include <utility>
 #include <memory>
 #include <map>
 #include <functional>
+#include <string>
 
+#include "tcpsocket.hpp"
+#include "selector.hpp"
 #include "httpparser.hpp"
 #include "logger.hpp"
 
@@ -20,44 +22,49 @@ public:
         RECEIVING_REQUEST,
         CONNECTING_TO_SERVER,
         SENDING_REQUEST,
-        RETRANSMITTING_RESPONSE
+        RECEIVING_RESPONSE,
+        SENDING_RESPONSE,
+        CLOSING
     };
 
     struct Connection
     {
         Connection()
             : state(ConnectionState::RECEIVING_REQUEST)
+            , have_connect_called(false)
         {}
 
-        Connection(std::unique_ptr<sf::TcpSocket>&& _clinet_socket)
+        Connection(std::unique_ptr<TcpSocket>&& _clinet_socket)
             : state(ConnectionState::RECEIVING_REQUEST)
             , request_socket(std::move(_clinet_socket))
             , idx(0)
+            , have_connect_called(false)
         {}
 
         ConnectionState state;
 
-        std::unique_ptr<sf::TcpSocket> request_socket;
-        std::unique_ptr<sf::TcpSocket> response_socket;
+        std::unique_ptr<TcpSocket> request_socket;
+        std::unique_ptr<TcpSocket> response_socket;
 
-        sf::IpAddress address;
-
+        std::string address;
         std::size_t idx;
-        std::vector<char> request;
+        std::vector<char> buffer;
+
+        bool have_connect_called;
     };
 
 public:
-    Proxy(const unsigned short port, const Logger& log);
+    Proxy(const uint16_t port, const Logger& log);
 
     Proxy(const Proxy&) = delete;
     Proxy& operator= (const Proxy&) = delete;
 
     void start();
 
-    void set_port(const unsigned short port);
+    void set_port(const uint16_t port);
 
 private:
-    unsigned short m_port;
+    uint16_t m_port;
 
     std::atomic_bool m_running;
 
@@ -65,33 +72,37 @@ private:
 
     static const std::size_t m_max_request_legnth = 1024;
 
-    sf::TcpListener m_listener;
+    TcpSocket m_server_socket;
 
-    using ID = std::pair<uint32_t, unsigned short>;
+    using ID = std::pair<std::string, uint16_t>;
+
     std::map<ID, Connection> m_connections;
 
-    sf::SocketSelector m_selector;
+    Selector m_selector;
 
-    static const unsigned short HTTP_PORT = 80;
+    char m_buffer[m_size_of_buffer];
 
-    char buffer[m_size_of_buffer];
-
-    std::map< ConnectionState, std::function<bool(Proxy*, Connection*)> > transitions;
+    std::map < ConnectionState, std::function<void(Proxy*, Connection*)> > m_transitions;
 
     Logger m_logger;
 
+    static const uint16_t HTTP_PORT = 80;
+
 private:
-    void handle_incoming_connection();
+    void handle_incoming_connection(const epoll_event &event);
+    void handle_connection(const epoll_event& event);
+
     void handle_connections();
 
-    bool handle_receiving_request(Connection *connection);
-    bool handle_connecting_to_server(Connection *connection);
-    bool handle_sending_request(Connection *connection);
-    bool handle_retransmitting_response(Connection *connection);
+    void handle_receiving_request(Connection *connection);
+    void handle_connecting_to_server(Connection *connection);
+    void handle_sending_request(Connection *connection);
+    void handle_receiving_response(Connection* connection);
+    void handle_sending_response(Connection* connection);
 
-    bool handle_received_data(Connection* connection, char* buffer, const std::size_t received);
+    void handle_received_data(Connection* connection, char* m_buffer, const std::size_t received);
 
-    void send_error(sf::TcpSocket* socket, const char* const message, const std::size_t size);
+    void send_error(TcpSocket* socket, const char* const message, const std::size_t size);
 };
 
 #endif // PROXY_HPP

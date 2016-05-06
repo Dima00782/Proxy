@@ -6,11 +6,14 @@
 #include <cassert>
 #include <cstddef>
 #include <string>
+#include <unistd.h>
+#include <functional>
+#include <algorithm>
 
 namespace
 {
 
-bool request_is_end(const std::vector<char>& request)
+bool http_query_is_end(const std::vector<char>& request)
 {
     if (request.size() > 4)
     {
@@ -24,26 +27,32 @@ bool request_is_end(const std::vector<char>& request)
     return false;
 }
 
+bool is_die_events(const uint32_t events)
+{
+    return (events & EPOLLERR) || (events & EPOLLHUP) || (events & EPOLLRDHUP);
 }
 
-Proxy::Proxy(unsigned short port, const Logger& log)
+}
+
+Proxy::Proxy(const uint16_t port, const Logger& log)
     : m_port(port)
     , m_running(false)
     , m_logger(log)
 {
-    transitions =
+    m_transitions =
     {
-        { ConnectionState::RECEIVING_REQUEST,       &Proxy::handle_receiving_request},
-        { ConnectionState::CONNECTING_TO_SERVER,    &Proxy::handle_connecting_to_server},
-        { ConnectionState::SENDING_REQUEST,         &Proxy::handle_sending_request},
-        { ConnectionState::RETRANSMITTING_RESPONSE, &Proxy::handle_retransmitting_response}
+        {ConnectionState::RECEIVING_REQUEST,       &Proxy::handle_receiving_request},
+        {ConnectionState::CONNECTING_TO_SERVER,    &Proxy::handle_connecting_to_server},
+        {ConnectionState::SENDING_REQUEST,         &Proxy::handle_sending_request},
+        {ConnectionState::RECEIVING_RESPONSE,      &Proxy::handle_receiving_response},
+        {ConnectionState::SENDING_RESPONSE,        &Proxy::handle_sending_response}
     };
 }
 
 void Proxy::start()
 {
-    auto code = m_listener.listen(m_port);
-    if (code != sf::Socket::Done)
+    auto code = m_server_socket.listen(m_port);
+    if (code != TcpSocket::Status::DONE)
     {
         std::cerr << "error on listen\n";
         return;
@@ -51,282 +60,322 @@ void Proxy::start()
 
     std::cout << "proxy starts at " << m_port << " port" << std::endl;
 
-    m_listener.setBlocking(false);
-    m_selector.add(m_listener);
+    auto incoming_handler = std::bind(&Proxy::handle_incoming_connection, this, std::placeholders::_1);
+    m_selector.add(m_server_socket, EPOLLIN, incoming_handler);
+
     m_running = true;
-
-    while (m_running)
-    {
-        // Make the selector wait for data on any socket
-        if (m_selector.wait())
-        {
-            // Test the listener
-            if (m_selector.isReady(m_listener))
-            {
-                handle_incoming_connection();
-            }
-            else
-            {
-                handle_connections();
-            }
-        }
-    }
+    while (m_running && m_selector.do_iteration());
 }
 
-void Proxy::set_port(const unsigned short port) { m_port = port; }
+void Proxy::set_port(const uint16_t port) { m_port = port; }
 
-void Proxy::handle_connections()
+void Proxy::handle_receiving_request(Connection* connection)
 {
-    for (auto it = m_connections.begin(); it != m_connections.end(); )
-    {
-        Connection* connection = &it->second;
-        auto handler = transitions[connection->state];
-        if (handler(this, connection)) { it = m_connections.erase(it); }
-        else { ++it; }
-    }
-}
+    assert(connection->state == ConnectionState::RECEIVING_REQUEST);
+    std::cerr << "handle_receiving_request\n";
+    std::fill(m_buffer, m_buffer + m_size_of_buffer, '\0');
 
-bool Proxy::handle_receiving_request(Connection* connection)
-{
     std::size_t received = 0;
     auto& socket = connection->request_socket;
+    assert(m_size_of_buffer > 0); // buffer size must be more than zero
 
-    if (m_selector.isReady(*socket))
+    auto status = TcpSocket::Status::ERROR;
+    while ((status = socket->receive(m_buffer, m_size_of_buffer - 1, &received)) == TcpSocket::Status::DONE
+           && connection->state != ConnectionState::CLOSING)
     {
-        assert(m_size_of_buffer > 0); // buffer size must be more than zero
-        auto status = socket->receive(buffer, m_size_of_buffer - 1, received);
-        if (status == sf::Socket::Done || status == sf::Socket::NotReady)
-        {
-            return handle_received_data(connection, buffer, received);
-        }
-
-        m_selector.remove(*socket);
-        if (status != sf::Socket::Disconnected)
-        {
-            std::cerr << "error on receive\n";
-        }
-        else
-        {
-            std::cout << "goodby\n";
-        }
-        return true;
+        handle_received_data(connection, m_buffer, received);
     }
 
-    return false;
+    if (status == TcpSocket::Status::ERROR)
+    {
+        std::cerr << "error on receive\n";
+    }
 }
 
-bool Proxy::handle_connecting_to_server(Proxy::Connection* connection)
+void Proxy::handle_connecting_to_server(Proxy::Connection* connection)
 {
+    std::cerr << "handle_connecting_to_server\n";
+
     assert(connection->state == ConnectionState::CONNECTING_TO_SERVER);
     assert(connection->response_socket != nullptr);
 
+    auto status = TcpSocket::Status::ERROR;
     auto socket = connection->response_socket.get();
-    auto status = socket->connect(connection->address, HTTP_PORT);
-    if (status == sf::Socket::NotReady)
+    if (connection->have_connect_called)
     {
-        // nothing to do here
-    }
-    else if (status == sf::Socket::Done)
-    {
-        std::size_t sent = 0;
-        auto& vector = connection->request;
-        auto status = connection->response_socket->send(vector.data() + connection->idx, vector.size() - connection->idx, sent);
-        if (status == sf::Socket::Error)
+        status = socket->isConnected();
+        if (status == TcpSocket::Status::DONE)
         {
-            std::cerr << "error on handle_connecting_to_server:send\n";
-            m_selector.remove(*socket);
-            m_selector.remove(*connection->request_socket);
-            return true;
+            connection->state = ConnectionState::SENDING_REQUEST;
+            handle_sending_request(connection);
         }
-        connection->idx += sent;
-        connection->state = ConnectionState::SENDING_REQUEST;
+        else if (status == TcpSocket::Status::ERROR)
+        {
+            std::cerr << "can't connect in handle_connecting_to_server:connect\n";
+            connection->state = ConnectionState::CLOSING;
+        }
+
+        return;
     }
-    else
+
+    status = socket->connect(IpAddress(connection->address, HTTP_PORT));
+    if (status == TcpSocket::Status::DONE)
+    {
+        connection->state = ConnectionState::SENDING_REQUEST;
+        handle_sending_request(connection);
+    }
+    else if (status == TcpSocket::Status::ERROR)
     {
         std::cerr << "can't connect in handle_connecting_to_server:connect\n";
-        m_selector.remove(*socket);
-        m_selector.remove(*connection->request_socket);
-        return true;
     }
 
-    return false;
+    connection->have_connect_called = true;
 }
 
-bool Proxy::handle_sending_request(Connection* connection)
+void Proxy::handle_sending_request(Connection* connection)
 {
+    std::cerr << "handle_sending_request\n";
+
     assert(connection->state == ConnectionState::SENDING_REQUEST);
     assert(connection->response_socket != nullptr);
 
     auto socket = connection->response_socket.get();
-    if (m_selector.isReady(*socket))
+    std::size_t sent = 0;
+    auto status = TcpSocket::Status::ERROR;
+    while (connection->idx != connection->buffer.size())
     {
-        if (connection->idx != connection->request.size())
+        status = socket->send(connection->buffer.data() + connection->idx, connection->buffer.size() - connection->idx, &sent);
+        if (status != TcpSocket::Status::DONE)
         {
-            std::size_t sent = 0;
-            auto status = socket->send(connection->request.data() + connection->idx, connection->request.size() - connection->idx, sent);
-            if (status == sf::Socket::Error)
-            {
-                std::cerr << "error on handle_sending_request::send\n";
-                return true;
-            }
-            connection->idx += sent;
+            break;
         }
-        else
-        {
-            connection->request.clear();
-            connection->idx = 0;
-            connection->state = ConnectionState::RETRANSMITTING_RESPONSE;
-        }
+        connection->idx += sent;
     }
 
-    return false;
+    if (status == TcpSocket::Status::ERROR)
+    {
+        std::cerr << "error on handle_sending_request::send\n";
+        connection->state = ConnectionState::CLOSING;
+        return;
+    }
+
+    if (connection->idx == connection->buffer.size())
+    {
+        connection->buffer.clear();
+        connection->idx = 0;
+        connection->state = ConnectionState::RECEIVING_RESPONSE;
+        handle_receiving_response(connection);
+    }
+
 }
 
-bool Proxy::handle_retransmitting_response(Connection* connection)
+void Proxy::handle_sending_response(Connection* connection)
 {
-    assert(connection->state == ConnectionState::RETRANSMITTING_RESPONSE);
+    std::cerr << "handle_sending_response\n";
+    assert(connection->state == ConnectionState::SENDING_RESPONSE);
     assert(connection->request_socket != nullptr);
+
+    auto request_socket = connection->request_socket.get();
+    std::size_t sent = 0;
+    auto* vector = &connection->buffer;
+    auto status = TcpSocket::Status::DONE;
+    while (vector->size() > connection->idx && status == TcpSocket::Status::DONE)
+    {
+        status = request_socket->send(vector->data(), vector->size() - connection->idx, &sent);
+        connection->idx += sent;
+    }
+
+    if (status == TcpSocket::Status::ERROR)
+    {
+        std::cerr << "error on handle_sending_response::send\n";
+        connection->state = ConnectionState::CLOSING;
+        return;
+    }
+
+    if (vector->size() == connection->idx)
+    {
+        connection->state = ConnectionState::CLOSING;
+    }
+}
+
+void Proxy::handle_receiving_response(Connection* connection)
+{
+    std::cerr << "handle_receiving_response\n";
+    assert(connection->state == ConnectionState::RECEIVING_RESPONSE);
     assert(connection->response_socket != nullptr);
 
     auto resposne_socket = connection->response_socket.get();
-    auto request_socket = connection->request_socket.get();
-    if (m_selector.isReady(*resposne_socket))
+    std::size_t received = m_size_of_buffer - 1;
+    auto status = TcpSocket::Status::DONE;
+    while (received != 0 && status == TcpSocket::Status::DONE)
     {
-        std::size_t received;
-        auto status = resposne_socket->receive(buffer, m_size_of_buffer - 1, received);
-        if (status == sf::Socket::NotReady)
+        std::fill(m_buffer, m_buffer + m_size_of_buffer, 0);
+        status = resposne_socket->receive(m_buffer, m_size_of_buffer - 1, &received);
+        connection->buffer.insert(connection->buffer.end(), m_buffer, m_buffer + received);
+        if (http_query_is_end(connection->buffer))
         {
-            connection->request.insert(connection->request.end(), buffer, buffer + received);
-        }
-        else if (status == sf::Socket::Error)
-        {
-            std::cerr << "error on handle_retransmitting_response::receive\n";
-            m_selector.remove(*request_socket);
-            m_selector.remove(*resposne_socket);
-            return true;
+            connection->state = ConnectionState::SENDING_RESPONSE;
+            handle_sending_response(connection);
+            return;
         }
     }
 
-    if (m_selector.isReady(*request_socket))
+    if (status == TcpSocket::Status::ERROR)
     {
-        std::size_t sent;
-        auto* vector = &connection->request;
-        if (vector->size() < connection->idx)
-        {
-            auto status = request_socket->send(vector->data(), vector->size() - connection->idx, sent);
-            if (status == sf::Socket::Done || status == sf::Socket::Error)
-            {
-                if (status == sf::Socket::Error) { std::cerr << "error on handle_retransmitting_response::send\n"; }
-
-                m_selector.remove(*request_socket);
-                m_selector.remove(*resposne_socket);
-                return true;
-            }
-            else { connection->idx += sent; }
-        }
-        else
-        {
-            m_selector.remove(*request_socket);
-            m_selector.remove(*resposne_socket);
-            return true;
-
-        }
+        std::cerr << "error on handle_receiving_response::receive\n";
+        connection->state = ConnectionState::CLOSING;
+        return;
     }
-
-    return false;
 }
 
-bool Proxy::handle_received_data(Connection* connection, char* buffer, const std::size_t received)
+void Proxy::handle_received_data(Connection* connection, char* buffer, const std::size_t received)
 {
+    std::cerr << "handle_received_data\n";
+
     buffer[received] = '\0';
 
-    if (connection->request.size() > m_max_request_legnth)
+    if (connection->buffer.size() > m_max_request_legnth)
     {
         // too large request, it must be an attack -> 500 Internal Server Error
         send_error(connection->request_socket.get(), "HTTP/1.0 500 OK", 16);
     }
 
-    connection->request.insert(connection->request.end(), buffer, buffer + received);
+    connection->buffer.insert(connection->buffer.end(), buffer, buffer + received);
 
-    if (request_is_end(connection->request))
+    HttpParser::Header header = HttpParser::parse(connection->buffer);
+    if (!header && connection->buffer.size() >= 4)
     {
-        HttpParser::Header header = HttpParser::parse(connection->request);
+        connection->state = ConnectionState::CLOSING;
+        return;
+    }
+
+    if (http_query_is_end(connection->buffer) && connection->address.empty())
+    {
         if (header)
         {
             if (header.method == HttpParser::Method::GET && header.version == HttpParser::Version::HTTP_1_0)
             {
                 // initialize new socket and add it to the selector
-                connection->address = sf::IpAddress(header.URI);
+                connection->address = header.URI;
 
                 // log
-                auto address = connection->request_socket->getRemoteAddress().toInteger();
+                auto address = connection->request_socket->getRemoteAddress();
                 auto port = connection->request_socket->getRemotePort();
                 m_logger.get_stream(Logger::LOG_LEVEL::INFO)
                         << "NEW CLIENT "
-                        << "Address : " << std::to_string(address)
+                        << "Address : " << address
                         << " Port : " + std::to_string(port)
                         << " URL : " + header.URI << std::endl;
 
                 assert(connection->response_socket == nullptr);
-                connection->response_socket = std::make_unique<sf::TcpSocket>();
-
-                auto socket = connection->response_socket.get();
-                socket->setBlocking(false);
-                auto status = socket->connect(connection->address, HTTP_PORT);
-                if (status == sf::Socket::Done)
-                {
-                    connection->state = ConnectionState::SENDING_REQUEST;
-                }
+                connection->response_socket = std::make_unique<TcpSocket>();
                 connection->state = ConnectionState::CONNECTING_TO_SERVER;
-                m_selector.add(*socket);
+                handle_connecting_to_server(connection);
+
+                auto handler = std::bind(&Proxy::handle_connection, this, std::placeholders::_1);
+                m_selector.add(*connection->response_socket, EPOLLOUT, handler);
             }
             else
             {
                 // not suppoted -> 405 Method Not Allowed
                 send_error(connection->request_socket.get(), "HTTP/1.0 405 OK", 16);
-                m_selector.remove(*connection->request_socket);
-                return true;
+                connection->state = ConnectionState::CLOSING;
             }
         }
         else
         {
             // server can't parse request -> 400 Bad Request
             send_error(connection->request_socket.get(), "HTTP/1.0 400 OK", 16);
-            m_selector.remove(*connection->request_socket);
-            return true;
+            connection->state = ConnectionState::CLOSING;
         }
     }
-
-    return false;
 }
 
-void Proxy::send_error(sf::TcpSocket *socket, const char* const message, const std::size_t size)
+void Proxy::send_error(TcpSocket *socket, const char* const message, const std::size_t size)
 {
     std::size_t sent;
-    if (socket->send(message, size, sent) != sf::Socket::Done) { std::cerr << "error on send_error\n"; }
+    if (socket->send(message, size, &sent) == TcpSocket::Status::ERROR) { std::cerr << "error on send_error\n"; }
     assert(sent != size);
 }
 
-void Proxy::handle_incoming_connection()
+void Proxy::handle_incoming_connection(const epoll_event& event)
 {
-    // The listener is ready: there is a pending connection
-    auto socket = std::make_unique<sf::TcpSocket>();
-    Connection connection(std::move(socket));
-    auto client_socket = connection.request_socket.get();
-    auto status = m_listener.accept(*client_socket);
-    if (status == sf::Socket::Done)
-    {
-        client_socket->setBlocking(false);
+    std::cerr << "handle_incoming_connection\n";
 
+    if (is_die_events(event.events))
+    {
+        (event.events & EPOLLERR) ? std::cerr << "EPOLLERR\n" : std::cout << "goodby\n";
+        ::close(event.data.fd);
+        return;
+    }
+
+    assert(event.events & EPOLLIN);
+    Connection connection(std::make_unique<TcpSocket>(-1));
+    auto client_socket = connection.request_socket.get();
+
+    auto status = TcpSocket::Status::DONE;
+    while ( (status = m_server_socket.accept(client_socket) ) == TcpSocket::Status::DONE)
+    {
         // Add the new connection to the selector so that we will
-        // be notified when he sends something
-        m_selector.add(*client_socket);
+        // be notified when it sends something
+        auto client_handler = std::bind(&Proxy::handle_connection, this, std::placeholders::_1);
+        m_selector.add(*client_socket, EPOLLIN, client_handler);
 
         // Add the new connection to the connections list
-        auto address = client_socket->getRemoteAddress().toInteger();
+        auto address = client_socket->getRemoteAddress();
         auto port = client_socket->getRemotePort();
-        m_connections[std::pair<uint32_t, unsigned short>(address, port)] = std::move(connection);
+
+        m_connections[std::pair<std::string, uint16_t>(address, port)] = std::move(connection);
     }
-    else if (status == sf::Socket::NotReady) { std::cerr << "not ready\n"; }
-    else { std::cerr << "error on accept\n"; }
+
+    if (status == TcpSocket::Status::ERROR) { std::cerr << "error on accept\n"; }
+
+}
+
+void Proxy::handle_connection(const epoll_event& event)
+{
+    auto it = m_connections.begin();
+    for (; it != m_connections.end(); ++it)
+    {
+        if (it->second.request_socket->m_socket_fd == event.data.fd
+                || it->second.response_socket->m_socket_fd == event.data.fd)
+        {
+            break;
+        }
+    }
+    assert(it != m_connections.end());
+
+    Connection* connection = &it->second;
+    auto handler = m_transitions[connection->state];
+    handler(this, connection);
+
+    if (connection->state == ConnectionState::CLOSING)
+    {
+        if (connection->request_socket)
+        {
+            m_selector.remove(*connection->request_socket);
+        }
+
+        if (connection->response_socket)
+        {
+            m_selector.remove(*connection->response_socket);
+        }
+
+        m_connections.erase(it);
+    }
+
+    if (is_die_events(event.events))
+    {
+        if (!connection->response_socket && connection->response_socket->m_socket_fd == event.data.fd)
+        {
+            m_selector.remove(*connection->response_socket);
+            connection->response_socket.reset();
+        }
+        else
+        {
+            (event.events & EPOLLERR) ? std::cerr << "EPOLLERR\n" : std::cerr << "goodby\n";
+            m_connections.erase(it);
+            return;
+        }
+    }
 }

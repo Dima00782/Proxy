@@ -24,6 +24,11 @@ HttpParser::Header HttpParser::parse(const std::vector<char>& request)
         }
         else
         {
+            if (str.size() >= 3)
+            {
+                header.method = Method::UNKNOWN;
+            }
+
             return header;
         }
 
