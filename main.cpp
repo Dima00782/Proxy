@@ -4,7 +4,7 @@
 int main()
 {
     Logger l;
-    Proxy proxy(5555, l);
+    Proxy proxy(7777, l);
     proxy.start();
 
     return 0;

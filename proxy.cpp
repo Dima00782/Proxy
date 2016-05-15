@@ -13,15 +13,35 @@
 namespace
 {
 
-bool http_query_is_end(const std::vector<char>& request)
+bool query_is_end(const std::vector<char>& request)
 {
     if (request.size() > 4)
     {
-
-        return request[request.size() - 4] == '\r'
+        return ((request[request.size() - 4] == '\r'
                 && request[request.size() - 3] == '\n'
                 && request[request.size() - 2] == '\r'
-                && request[request.size() - 1] == '\n';
+                && request[request.size() - 1] == '\n')
+                ||
+                (request.size() > 7
+                && request[request.size() - 1] == '>'
+                && request[request.size() - 2] == 'l'
+                && request[request.size() - 3] == 'm'
+                && request[request.size() - 4] == 't'
+                && request[request.size() - 5] == 'h'
+                && request[request.size() - 6] == '/'
+                && request[request.size() - 7] == '<')
+                ||
+                (request.size() > 9
+                && request[request.size() - 1] == '\n'
+                && request[request.size() - 2] == '\r'
+                && request[request.size() - 3] == '>'
+                && request[request.size() - 4] == 'L'
+                && request[request.size() - 5] == 'M'
+                && request[request.size() - 6] == 'T'
+                && request[request.size() - 7] == 'H'
+                && request[request.size() - 8] == '/'
+                && request[request.size() - 9] == '<')
+                );
     }
 
     return false;
@@ -127,6 +147,7 @@ void Proxy::handle_connecting_to_server(Proxy::Connection* connection)
     else if (status == TcpSocket::Status::ERROR)
     {
         std::cerr << "can't connect in handle_connecting_to_server:connect\n";
+        connection->state = ConnectionState::CLOSING;
     }
 
     connection->have_connect_called = true;
@@ -211,8 +232,11 @@ void Proxy::handle_receiving_response(Connection* connection)
     {
         std::fill(m_buffer, m_buffer + m_size_of_buffer, 0);
         status = resposne_socket->receive(m_buffer, m_size_of_buffer - 1, &received);
-        connection->buffer.insert(connection->buffer.end(), m_buffer, m_buffer + received);
-        if (http_query_is_end(connection->buffer))
+        if (received != 0) {
+            connection->buffer.insert(connection->buffer.end(), m_buffer, m_buffer + received);
+        }
+
+        if (query_is_end(connection->buffer))
         {
             connection->state = ConnectionState::SENDING_RESPONSE;
             handle_sending_response(connection);
@@ -249,7 +273,7 @@ void Proxy::handle_received_data(Connection* connection, char* buffer, const std
         return;
     }
 
-    if (http_query_is_end(connection->buffer) && connection->address.empty())
+    if (query_is_end(connection->buffer) && connection->address.empty())
     {
         if (header)
         {
@@ -351,6 +375,7 @@ void Proxy::handle_connection(const epoll_event& event)
 
     if (connection->state == ConnectionState::CLOSING)
     {
+        std::cerr << "goodby\n";
         if (connection->request_socket)
         {
             m_selector.remove(*connection->request_socket);
@@ -363,13 +388,15 @@ void Proxy::handle_connection(const epoll_event& event)
 
         m_connections.erase(it);
     }
-
-    if (is_die_events(event.events))
+    else if (is_die_events(event.events))
     {
         if (!connection->response_socket && connection->response_socket->m_socket_fd == event.data.fd)
         {
             m_selector.remove(*connection->response_socket);
             connection->response_socket.reset();
+            if (connection->state == ConnectionState::RECEIVING_RESPONSE && !connection->buffer.empty()) {
+                connection->state = ConnectionState::SENDING_RESPONSE;
+            }
         }
         else
         {

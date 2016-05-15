@@ -38,6 +38,10 @@ TcpSocket::Status TcpSocket::connect(const IpAddress& remoteAddress)
 {
     assert(m_socket_fd != -1);
     addrinfo* address = remoteAddress.get_address_info();
+    if (address == nullptr) {
+        return Status::ERROR;
+    }
+
     int result_code = ::connect(m_socket_fd, address->ai_addr, address->ai_addrlen);
     if (result_code == -1)
     {

@@ -23,7 +23,7 @@ addrinfo* dns_lookup(const std::string& address, const uint16_t port)
     status = getaddrinfo(address.empty() ? 0 : address.c_str(), service.c_str(), hints.get(), &addr_info);
     if (0 != status)
     {
-        std::cerr << "error in IpAddress\n";
+        std::cerr << "can't resolve IpAddress\n";
         return nullptr;
     }
 
