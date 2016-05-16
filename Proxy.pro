@@ -9,6 +9,8 @@ SOURCES += main.cpp \
     ipaddress.cpp \
     selector.cpp \
     tcpsocket.cpp \
+    tcpsocket.cpp \
+    scheduler.cpp \
     logger.cpp
 
 HEADERS += \
@@ -17,4 +19,6 @@ HEADERS += \
     ipaddress.hpp \
     selector.hpp \
     tcpsocket.hpp \
+    scheduler.hpp \
+    functionwrapper.hpp \
     logger.hpp

@@ -20,10 +20,11 @@ bool is_die_events(const uint32_t events)
 
 }
 
-Proxy::Proxy(const uint16_t port, const Logger& log)
+Proxy::Proxy(const uint16_t port, const Logger& log, std::unique_ptr<Scheduler> &&scheduler)
     : m_port(port)
     , m_running(false)
     , m_logger(log)
+    , m_scheduler(std::move(scheduler))
 {
     m_transitions =
     {
@@ -378,7 +379,7 @@ void Proxy::handle_connection(const epoll_event& event)
 
     Connection* connection = &it->second;
     auto handler = m_transitions[connection->state];
-    handler(this, connection);
+    m_scheduler->schedule(handler, this, connection);
 
     if (connection->state == ConnectionState::CLOSING)
     {

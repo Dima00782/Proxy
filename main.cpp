@@ -1,10 +1,11 @@
 #include "proxy.hpp"
-#include <iostream>
+#include "scheduler.hpp"
 
 int main()
 {
     Logger l;
-    Proxy proxy(7777, l);
+    auto scheduler = std::make_unique<Scheduler>();
+    Proxy proxy(5555, l, std::move(scheduler));
     proxy.start();
 
     return 0;
