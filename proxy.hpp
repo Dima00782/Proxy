@@ -24,6 +24,7 @@ public:
         SENDING_REQUEST,
         RECEIVING_RESPONSE,
         SENDING_RESPONSE,
+        SENDING_ERROR,
         CLOSING
     };
 
@@ -48,7 +49,7 @@ public:
 
         std::string address;
         std::size_t idx;
-        std::vector<char> buffer;
+        std::string buffer;
 
         bool have_connect_called;
     };
@@ -70,7 +71,7 @@ private:
 
     static const std::size_t m_size_of_buffer =  1024;
 
-    static const std::size_t m_max_request_legnth = 1024;
+    static const std::size_t m_max_request_legnth = 2048;
 
     TcpSocket m_server_socket;
 
@@ -99,10 +100,11 @@ private:
     void handle_sending_request(Connection *connection);
     void handle_receiving_response(Connection* connection);
     void handle_sending_response(Connection* connection);
+    void handle_sending_error(Connection* connection);
 
     void handle_received_data(Connection* connection, char* m_buffer, const std::size_t received);
 
-    void send_error(TcpSocket* socket, const char* const message, const std::size_t size);
+    void send_error(Connection* socket, const std::string& message);
 };
 
 #endif // PROXY_HPP

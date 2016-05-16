@@ -40,7 +40,8 @@ public:
     };
 
 public:
-    static Header parse(const std::vector<char>& request);
+    static Header parse(const std::string& request);
+    static bool query_is_end(const std::string& request);
 };
 
 #endif // HTTP_PARSER_HPP
