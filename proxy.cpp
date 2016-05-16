@@ -261,7 +261,7 @@ void Proxy::handle_received_data(Connection* connection, char* buffer, const std
     if (connection->buffer.size() > m_max_request_legnth)
     {
         // too large request, it must be an attack -> send 500 Internal Server Error
-        send_error(connection, "HTTP/1.0 500 OK\r\n\r\n");
+        send_error(connection, "HTTP/1.0 500 Internal Server Error\r\n\r\n");
     }
 
     connection->buffer.insert(connection->buffer.end(), buffer, buffer + received);
@@ -309,13 +309,13 @@ void Proxy::handle_received_data(Connection* connection, char* buffer, const std
             else
             {
                 // not suppoted -> 405 Method Not Allowed
-                send_error(connection, "HTTP/1.0 405 OK\r\n\r\n");
+                send_error(connection, "HTTP/1.0 405 Method Not Allowed\r\n\r\n");
             }
         }
         else
         {
             // server can't parse request -> 400 Bad Request
-            send_error(connection, "HTTP/1.0 400 OK\r\n\r\n");
+            send_error(connection, "HTTP/1.0 400 Bad Request\r\n\r\n");
         }
     }
 }
@@ -325,6 +325,7 @@ void Proxy::send_error(Connection* connection, const std::string& message)
     connection->state = ConnectionState::SENDING_ERROR;
     connection->buffer.clear();
     connection->buffer.insert(connection->buffer.begin(), message.begin(), message.end());
+    connection->idx = 0;
     handle_sending_error(connection);
 }
 
