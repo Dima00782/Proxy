@@ -6,7 +6,7 @@ All operation are non-blocking even connect is asynchronous
 
 ### build:
 ```bash
-g++ *.cpp -g -std=c++14 -Wall -o proxy -lpthread
+g++ *.cpp -g -std=c++14 -Wall -o proxy
 ```
 
 ### run:

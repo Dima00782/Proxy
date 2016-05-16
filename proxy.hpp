@@ -13,7 +13,6 @@
 #include "selector.hpp"
 #include "httpparser.hpp"
 #include "logger.hpp"
-#include "scheduler.hpp"
 
 class Proxy final
 {
@@ -56,7 +55,7 @@ public:
     };
 
 public:
-    Proxy(const uint16_t port, const Logger& log, std::unique_ptr<Scheduler>&& scheduler);
+    Proxy(const uint16_t port, const Logger& log);
 
     Proxy(const Proxy&) = delete;
     Proxy& operator= (const Proxy&) = delete;
@@ -89,8 +88,6 @@ private:
     Logger m_logger;
 
     static const uint16_t HTTP_PORT = 80;
-
-    std::unique_ptr<Scheduler> m_scheduler;
 
 private:
     void handle_incoming_connection(const epoll_event &event);
