@@ -69,16 +69,19 @@ HttpParser::Header HttpParser::parse(const std::string& request)
 bool HttpParser::query_is_end(const std::string& request)
 {
     auto pos = request.find("Content-Length: ");
-    if (pos != std::string::npos) {
+    if (pos != std::string::npos)
+    {
         pos += 16; // sizeof "Content-Length: "
         auto end_of_content_length = request.find("\r\n", pos);
-        if (end_of_content_length != std::string::npos) {
+        if (end_of_content_length != std::string::npos)
+        {
             auto length_string = request.substr(pos, end_of_content_length - pos);
             auto content_length = std::stoul(length_string);
 
             auto end_of_http_header = request.find("\r\n\r\n");
             if (end_of_http_header != std::string::npos
-                    && ((request.size() - end_of_http_header - 4 /* sizeof "\r\n\r\n" */) >= content_length)) {
+                    && ((request.size() - end_of_http_header - 4 /* sizeof "\r\n\r\n" */) >= content_length))
+            {
                 return true;
             }
         }
