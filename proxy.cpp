@@ -117,6 +117,8 @@ void Proxy::handle_connecting_to_server(Proxy::Connection* connection)
         connection->state = ConnectionState::CLOSING;
     }
 
+    auto handler = std::bind(&Proxy::handle_connection, this, std::placeholders::_1);
+    m_selector.add(*connection->response_socket, EPOLLOUT, handler);
     connection->have_connect_called = true;
 }
 
@@ -152,6 +154,7 @@ void Proxy::handle_sending_request(Connection* connection)
         connection->buffer.clear();
         connection->idx = 0;
         connection->state = ConnectionState::RECEIVING_RESPONSE;
+        m_selector.change_mode(*socket, EPOLLIN);
         handle_receiving_response(connection);
     }
 
@@ -229,7 +232,7 @@ void Proxy::handle_receiving_response(Connection* connection)
         std::fill(m_buffer, m_buffer + m_size_of_buffer, 0);
         status = resposne_socket->receive(m_buffer, m_size_of_buffer - 1, &received);
 
-        std::cerr << "handle_receiving_response : " << received << std::endl;
+        std::cerr << received << std::endl;
 
         if (received != 0) {
             // TODO : potential buffer overflow
@@ -239,6 +242,7 @@ void Proxy::handle_receiving_response(Connection* connection)
         if (HttpParser::query_is_end(connection->buffer))
         {
             connection->state = ConnectionState::SENDING_RESPONSE;
+            m_selector.change_mode(*connection->request_socket, EPOLLOUT);
             handle_sending_response(connection);
             return;
         }
@@ -273,13 +277,6 @@ void Proxy::handle_received_data(Connection* connection, char* buffer, const std
         return;
     }
 
-    if (received == 0) {
-        for (auto i : connection->buffer) {
-            std::cout << i << ' ';
-        }
-        std::cout << std::endl;
-    }
-
     if (HttpParser::query_is_end(connection->buffer) && connection->address.empty())
     {
         if (header)
@@ -302,9 +299,6 @@ void Proxy::handle_received_data(Connection* connection, char* buffer, const std
                 connection->response_socket = std::make_unique<TcpSocket>();
                 connection->state = ConnectionState::CONNECTING_TO_SERVER;
                 handle_connecting_to_server(connection);
-
-                auto handler = std::bind(&Proxy::handle_connection, this, std::placeholders::_1);
-                m_selector.add(*connection->response_socket, EPOLLOUT, handler);
             }
             else
             {
@@ -326,6 +320,7 @@ void Proxy::send_error(Connection* connection, const std::string& message)
     connection->buffer.clear();
     connection->buffer.insert(connection->buffer.begin(), message.begin(), message.end());
     connection->idx = 0;
+    m_selector.change_mode(*connection->request_socket, EPOLLOUT);
     handle_sending_error(connection);
 }
 
@@ -335,7 +330,7 @@ void Proxy::handle_incoming_connection(const epoll_event& event)
 
     if (is_die_events(event.events))
     {
-        (event.events & EPOLLERR) ? std::cerr << "EPOLLERR\n" : std::cout << "goodby\n";
+        (event.events & EPOLLERR) ? std::cerr << "EPOLLERR\n" : std::cerr << "goodby\n";
         ::close(event.data.fd);
         return;
     }
@@ -397,7 +392,7 @@ void Proxy::handle_connection(const epoll_event& event)
     }
     else if (is_die_events(event.events))
     {
-        if (!connection->response_socket && connection->response_socket->m_socket_fd == event.data.fd)
+        if (connection->response_socket && connection->response_socket->m_socket_fd == event.data.fd)
         {
             m_selector.remove(*connection->response_socket);
             connection->response_socket.reset();
@@ -408,7 +403,19 @@ void Proxy::handle_connection(const epoll_event& event)
         else
         {
             (event.events & EPOLLERR) ? std::cerr << "EPOLLERR\n" : std::cerr << "goodby\n";
+
+            if (connection->request_socket)
+            {
+                m_selector.remove(*connection->request_socket);
+            }
+
+            if (connection->response_socket)
+            {
+                m_selector.remove(*connection->response_socket);
+            }
+
             m_connections.erase(it);
+
             return;
         }
     }

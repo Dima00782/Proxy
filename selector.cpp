@@ -54,7 +54,8 @@ void Selector::change_mode(const TcpSocket& socket, const uint32_t mode)
 
     auto event = event_iterator->second.m_event_ptr.get();
     event->events = mode;
-    int return_code = epoll_ctl(m_selector_fd, EPOLL_CTL_DEL, socket.m_socket_fd, event);
+    event->events |= EPOLLET; // always add edge-triggered mode
+    int return_code = epoll_ctl(m_selector_fd, EPOLL_CTL_MOD, socket.m_socket_fd, event);
     if (return_code == -1)
     {
         perror("epoll_ctl:change_mode");
@@ -75,6 +76,7 @@ const auto default_handler = [](Selector*, const epoll_event&)
 
 bool Selector::do_iteration()
 {
+    std::cout << "epoll wait " << m_size << std::endl;
     int n = ::epoll_wait(m_selector_fd, m_buffer.data(), m_size, -1);
     if (n >= 0)
     {
